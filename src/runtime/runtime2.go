@@ -325,16 +325,16 @@ type gobuf struct {
 	// write barriers.
 
 	// 存储 rsp 寄存器的值
-	sp   uintptr
+	sp uintptr
 	// 存储 rip 寄存器的值
-	pc   uintptr
+	pc uintptr
 	// 指向 goroutine
 	g    guintptr
 	ctxt unsafe.Pointer
 	// 保存系统调用的返回值
-	ret  sys.Uintreg
-	lr   uintptr
-	bp   uintptr // for framepointer-enabled architectures
+	ret sys.Uintreg
+	lr  uintptr
+	bp  uintptr // for framepointer-enabled architectures
 }
 
 // sudog represents a g in a wait list, such as for sending/receiving
