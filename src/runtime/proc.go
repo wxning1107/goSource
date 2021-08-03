@@ -2648,7 +2648,9 @@ func execute(gp *g, inheritTime bool) {
 
 // Finds a runnable goroutine to execute.
 // Tries to steal from other P's, get g from local or global queue, poll network.
+// 从其他地方找 goroutine 来执行
 func findrunnable() (gp *g, inheritTime bool) {
+	// 取当前指向的 g，也就是 g0
 	_g_ := getg()
 
 	// The conditions here and in handoffp must agree: if
@@ -2677,11 +2679,13 @@ top:
 	}
 
 	// local runq
+	// 从本地队列获取
 	if gp, inheritTime := runqget(_p_); gp != nil {
 		return gp, inheritTime
 	}
 
 	// global runq
+	// 从全局队列获取
 	if sched.runqsize != 0 {
 		lock(&sched.lock)
 		gp := globrunqget(_p_, 0)
@@ -2716,14 +2720,18 @@ top:
 	// If number of spinning M's >= number of busy P's, block.
 	// This is necessary to prevent excessive CPU consumption
 	// when GOMAXPROCS>>1 but the program parallelism is low.
+	// 如果有很多工作线程在找工作，那我就停下休息。避免消耗太多 CPU
 	if !_g_.m.spinning && 2*atomic.Load(&sched.nmspinning) >= procs-atomic.Load(&sched.npidle) {
 		goto stop
 	}
 	if !_g_.m.spinning {
+		// 设置自旋状态为 true
 		_g_.m.spinning = true
+		// 自旋状态数加 1
 		atomic.Xadd(&sched.nmspinning, 1)
 	}
 	const stealTries = 4
+	// 从其它 p 的本地运行队列盗取 goroutine
 	for i := 0; i < stealTries; i++ {
 		stealTimersOrRunNextG := i == stealTries-1
 
@@ -2845,9 +2853,11 @@ stop:
 		unlock(&sched.lock)
 		return gp, false
 	}
+	// 当前工作线程解除与 p 之间的绑定，准备去休眠
 	if releasep() != _p_ {
 		throw("findrunnable: wrong p")
 	}
+	// 把 p 放入空闲队列
 	pidleput(_p_)
 	unlock(&sched.lock)
 
@@ -2866,6 +2876,7 @@ stop:
 	// Also see "Worker thread parking/unparking" comment at the top of the file.
 	wasSpinning := _g_.m.spinning
 	if _g_.m.spinning {
+		// m 即将睡眠，不再处于自旋
 		_g_.m.spinning = false
 		if int32(atomic.Xadd(&sched.nmspinning, -1)) < 0 {
 			throw("findrunnable: negative nmspinning")
@@ -2873,6 +2884,7 @@ stop:
 	}
 
 	// check all runqueues once again
+	// 休眠之前再检查一下所有的 p，看一下是否有工作要做
 	for id, _p_ := range allpSnapshot {
 		if !idlepMaskSnapshot.read(uint32(id)) && !runqempty(_p_) {
 			lock(&sched.lock)
@@ -3010,6 +3022,7 @@ stop:
 			netpollBreak()
 		}
 	}
+	// 休眠
 	stopm()
 	goto top
 }
@@ -6114,15 +6127,23 @@ func runqget(_p_ *p) (gp *g, inheritTime bool) {
 // Batch is a ring buffer starting at batchHead.
 // Returns number of grabbed goroutines.
 // Can be executed by any P.
+// 从 _p_ 批量获取可运行 goroutine，放到 batch 数组里
+// batch 是一个环，起始于 batchHead
+// 返回偷的数量，返回的 goroutine 可被任何 P 执行
 func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool) uint32 {
 	for {
+		// 队列头
 		h := atomic.LoadAcq(&_p_.runqhead) // load-acquire, synchronize with other consumers
+		// 队列尾
 		t := atomic.LoadAcq(&_p_.runqtail) // load-acquire, synchronize with the producer
+		// g 的数量
 		n := t - h
+		// 取一半
 		n = n - n/2
 		if n == 0 {
 			if stealRunNextG {
 				// Try to steal from _p_.runnext.
+				// 连 runnext 都要偷
 				if next := _p_.runnext; next != 0 {
 					if _p_.status == _Prunning {
 						// Sleep to ensure that _p_ isn't about to run the g
@@ -6135,6 +6156,10 @@ func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool
 						// between different Ps.
 						// A sync chan send/recv takes ~50ns as of time of
 						// writing, so 3us gives ~50x overshoot.
+						// 这里是为了防止 _p_ 执行当前 g，并且马上就要阻塞，所以会马上执行 runnext，
+						// 这个时候偷就没必要了，因为让 g 在 P 之间"游走"不太划算，
+						// 就不偷了，给他们一个机会。
+						// channel 一次同步的的接收发送需要 50ns 左右，因此 3us 差不多给了他们 50 次机会了，做得还是不错的
 						if GOOS != "windows" {
 							usleep(3)
 						} else {
@@ -6147,19 +6172,25 @@ func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool
 					if !_p_.runnext.cas(next, 0) {
 						continue
 					}
+					// 真的偷走了 next
 					batch[batchHead%uint32(len(batch))] = next
+					// 返回偷的数量，只有 1 个
 					return 1
 				}
 			}
+			// 没偷到
 			return 0
 		}
+		// 如果 n 这时变得太大了，重新来一遍了，不能偷的太多，做得太过分了
 		if n > uint32(len(_p_.runq)/2) { // read inconsistent h and t
 			continue
 		}
+		// 将 g 放置到 bacth 中
 		for i := uint32(0); i < n; i++ {
 			g := _p_.runq[(h+i)%uint32(len(_p_.runq))]
 			batch[(batchHead+i)%uint32(len(batch))] = g
 		}
+		// 工作被偷走了，更新一下队列头指针
 		if atomic.CasRel(&_p_.runqhead, h, h+n) { // cas-release, commits consume
 			return n
 		}
@@ -6169,21 +6200,29 @@ func runqgrab(_p_ *p, batch *[256]guintptr, batchHead uint32, stealRunNextG bool
 // Steal half of elements from local runnable queue of p2
 // and put onto local runnable queue of p.
 // Returns one of the stolen elements (or nil if failed).
+// 从 p2 偷走一半的工作放到 _p_ 的本地
 func runqsteal(_p_, p2 *p, stealRunNextG bool) *g {
+	// 队尾
 	t := _p_.runqtail
+	// 从 p2 偷取工作，放到 _p_.runq 的队尾，n 表示偷到的工作数量
 	n := runqgrab(p2, &_p_.runq, t, stealRunNextG)
 	if n == 0 {
 		return nil
 	}
 	n--
+	// 找到最后一个 g，准备返回
 	gp := _p_.runq[(t+n)%uint32(len(_p_.runq))].ptr()
 	if n == 0 {
+		// 说明只偷了一个 g
 		return gp
 	}
+	// 队列头
 	h := atomic.LoadAcq(&_p_.runqhead) // load-acquire, synchronize with consumers
+	// 判断是否偷太多了
 	if t-h+n >= uint32(len(_p_.runq)) {
 		throw("runqsteal: runq overflow")
 	}
+	// 更新队尾，将偷来的工作加入队列
 	atomic.StoreRel(&_p_.runqtail, t+n) // store-release, makes the item available for consumption
 	return gp
 }
