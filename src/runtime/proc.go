@@ -5748,32 +5748,42 @@ func globrunqputbatch(batch *gQueue, n int32) {
 
 // Try get a batch of G's from the global runnable queue.
 // sched.lock must be held.
+// 尝试从全局队列里获取可运行的 goroutine 队列
 func globrunqget(_p_ *p, max int32) *g {
 	assertLockHeld(&sched.lock)
 
+	// 如果队列大小为 0
 	if sched.runqsize == 0 {
 		return nil
 	}
 
+	// 根据 p 的数量平分全局运行队列中的 goroutines
 	n := sched.runqsize/gomaxprocs + 1
+	// 如果 gomaxprocs 为 1
 	if n > sched.runqsize {
 		n = sched.runqsize
 	}
+	// 修正"偷"的数量
 	if max > 0 && n > max {
 		n = max
 	}
+	// 最多只能"偷"本地工作队列一半的数量
 	if n > int32(len(_p_.runq))/2 {
 		n = int32(len(_p_.runq)) / 2
 	}
 
+	// 更新全局可运行队列长度
 	sched.runqsize -= n
 
 	gp := sched.runq.pop()
 	n--
+	// 把全局队列中 n-1 个 goroutine 转移到本地
 	for ; n > 0; n-- {
 		gp1 := sched.runq.pop()
+		// 尝试将 gp1 放入 P 本地，使全局队列得到更多的执行机会
 		runqput(_p_, gp1, false)
 	}
+	// 返回最开始获取到的队列头所指向的 goroutine
 	return gp
 }
 
@@ -6056,25 +6066,44 @@ func runqputbatch(pp *p, q *gQueue, qsize int) {
 // If inheritTime is true, gp should inherit the remaining time in the
 // current time slice. Otherwise, it should start a new time slice.
 // Executed only by the owner P.
+// 从本地可运行队列里找到一个 g
+// 如果 inheritTime 为真，gp 应该继承这个时间片，
+// 否则，新开启一个时间片
 func runqget(_p_ *p) (gp *g, inheritTime bool) {
 	// If there's a runnext, it's the next G to run.
+	// 如果 runnext 不为空，则 runnext 是下一个待运行的 G
+	// 第一个 for 循环尝试返回 P 的 runnext 成员，因为 runnext 具有最高的运行优先级，因此要首先尝试获取 runnext。
+	// 当发现 runnext 为空时，直接跳出循环，进入第二个
+	// 否则，用原子操作获取 runnext，并将其值修改为 0，也就是空。这里用到原子操作的原因是防止在这个过程中，有其他线程过来“偷工作”，导致并发修改 runnext 成员。
 	for {
 		next := _p_.runnext
 		if next == 0 {
+			// 为空，则直接跳出循环
 			break
 		}
+		// 再次比较 next 是否没有变化
 		if _p_.runnext.cas(next, 0) {
+			// 如果没有变化，则返回 next 所指向的 g。且需要继承时间片
 			return next.ptr(), true
 		}
 	}
 
+	// 第二个 for 循环则是在尝试获取 runnext 成员失败后，尝试从本地队列中返回队列头的 goroutine
+	// 同样，先用原子操作获取队列头，使用原子操作的原因同样是防止其他线程“偷工作”时并发对队列头的并发写操作。
+	// 之后，直接获取队列尾，因为不担心其他线程同时更改，所以直接获取。注意，“偷工作”时只会修改队列头。
+	// 比较队列头和队列尾，如果两者相等，说明 P 本地队列没有可运行的 goroutine，直接返回空。否则，算出队列头指向的 goroutine，再用一个 CAS 原子操作来尝试修改队列头，使用原子操作的原因同上。
 	for {
+		// 获取队列头
 		h := atomic.LoadAcq(&_p_.runqhead) // load-acquire, synchronize with other consumers
+		// 获取队列尾
 		t := _p_.runqtail
 		if t == h {
+			// 头和尾相等，说明本地队列为空，找不到 g
 			return nil, false
 		}
+		// 获取队列头的 g
 		gp := _p_.runq[h%uint32(len(_p_.runq))].ptr()
+		// 原子操作，防止这中间被其他线程因为偷工作而修改
 		if atomic.CasRel(&_p_.runqhead, h, h+1) { // cas-release, commits consume
 			return gp, false
 		}
@@ -6211,8 +6240,10 @@ func (q *gQueue) pushBackAll(q2 gQueue) {
 // pop removes and returns the head of queue q. It returns nil if
 // q is empty.
 func (q *gQueue) pop() *g {
+	// 获取当前队列头
 	gp := q.head.ptr()
 	if gp != nil {
+		// 移动队列头
 		q.head = gp.schedlink
 		if q.head == 0 {
 			q.tail = 0
