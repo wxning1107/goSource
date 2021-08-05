@@ -1168,10 +1168,13 @@ func (s *state) stmt(n *Node) {
 			Warnl(n.Pos, "%s defer", defertype)
 		}
 		if s.hasOpenDefers {
+			// 开放编码
 			s.openDeferRecord(n.Left)
 		} else {
+			// 堆分配
 			d := callDefer
 			if n.Esc == EscNever {
+				// 栈分配
 				d = callDeferStack
 			}
 			s.callResult(n.Left, d)
@@ -4603,6 +4606,7 @@ func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 
 	var call *ssa.Value
 	if k == callDeferStack {
+		// 在栈上初始化 defer 结构体
 		testLateExpansion = ssa.LateCallExpansionEnabledWithin(s.f)
 		// Make a defer struct d on the stack.
 		t := deferstruct(stksize)
