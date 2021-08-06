@@ -655,6 +655,7 @@ func Goexit() {
 
 // Call all Error and String methods before freezing the world.
 // Used when crashing with panicking.
+// 在停止前调用所有的 Error 和 String 方法
 func preprintpanics(p *_panic) {
 	defer func() {
 		if recover() != nil {
@@ -882,8 +883,13 @@ func reflectcallSave(p *_panic, fn, arg unsafe.Pointer, argsize uint32) {
 }
 
 // The implementation of the predeclared function panic.
+// 编译器会将关键字 panic 转换成 gopanic
 func gopanic(e interface{}) {
 	gp := getg()
+	// 判断在系统栈上还是在用户栈上
+	// 如果执行在系统或信号栈时，getg() 会返回当前 m 的 g0 或 gsignal
+	// 因此可以通过 gp.m.curg == gp 来判断所在栈
+	// 系统栈上的 panic 无法恢复
 	if gp.m.curg != gp {
 		print("panic: ")
 		printany(e)
@@ -891,12 +897,14 @@ func gopanic(e interface{}) {
 		throw("panic on system stack")
 	}
 
+	// 如果正在进行 malloc 时发生 panic 也无法恢复
 	if gp.m.mallocing != 0 {
 		print("panic: ")
 		printany(e)
 		print("\n")
 		throw("panic during malloc")
 	}
+	// 在禁止抢占时发生 panic 也无法恢复
 	if gp.m.preemptoff != "" {
 		print("panic: ")
 		printany(e)
@@ -906,6 +914,7 @@ func gopanic(e interface{}) {
 		print("\n")
 		throw("panic during preemptoff")
 	}
+	// 在 g 锁在 m 上时发生 panic 也无法恢复
 	if gp.m.locks != 0 {
 		print("panic: ")
 		printany(e)
@@ -916,6 +925,7 @@ func gopanic(e interface{}) {
 	var p _panic
 	p.arg = e
 	p.link = gp._panic
+	// 创建新的 runtime._panic 并添加到所在 Goroutine 的 _panic 链表的最前面
 	gp._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
 
 	atomic.Xadd(&runningPanicDefers, 1)
@@ -924,8 +934,11 @@ func gopanic(e interface{}) {
 	// gopanic frame (stack scanning is slow...)
 	addOneOpenDeferFrame(gp, getcallerpc(), unsafe.Pointer(getcallersp()))
 
+	// 在循环中不断从当前 Goroutine 的 _defer 中链表获取 runtime._defer 并调用 runtime.reflectcall 运行延迟调用函数
 	for {
+		// 开始逐个取当前 goroutine 的 defer 调用
 		d := gp._defer
+		// 如果没有 defer 调用，则跳出循环
 		if d == nil {
 			break
 		}
@@ -933,6 +946,8 @@ func gopanic(e interface{}) {
 		// If defer was started by earlier panic or Goexit (and, since we're back here, that triggered a new panic),
 		// take defer off list. An earlier panic will not continue running, but we will make sure below that an
 		// earlier Goexit does continue running.
+		// 如果 defer 是由早期的 panic 或 Goexit 开始的（并且，因为我们回到这里，这引发了新的 panic,
+		// 则将 defer 带离链表。更早的 panic 或 Goexit 将无法继续运行。
 		if d.started {
 			if d._panic != nil {
 				d._panic.aborted = true
@@ -953,11 +968,15 @@ func gopanic(e interface{}) {
 		// Mark defer as started, but keep on list, so that traceback
 		// can find and update the defer's argument frame if stack growth
 		// or a garbage collection happens before reflectcall starts executing d.fn.
+		// 如果栈增长或者垃圾回收在 reflectcall 开始执行 d.fn 前发生
+		// 标记 defer 已经开始执行，但仍将其保存在列表中，从而 traceback 可以找到并更新这个 defer 的参数帧
 		d.started = true
 
 		// Record the panic that is running the defer.
 		// If there is a new panic during the deferred call, that panic
 		// will find d in the list and will mark d._panic (this panic) aborted.
+		// 记录正在运行 defer 的 panic。如果在 defer 调用期间出现新的 panic，该 panic 将在列表中
+		// 找到 d 并标记 d._panic（该 panic）中止。
 		d._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
 
 		done := true
@@ -968,11 +987,13 @@ func gopanic(e interface{}) {
 			}
 		} else {
 			p.argp = unsafe.Pointer(getargp(0))
+			// 每个在 panic 和 recover 之间的 defer 都会在这里通过 reflectcall 执行。
 			reflectcall(nil, unsafe.Pointer(d.fn), deferArgs(d), uint32(d.siz), uint32(d.siz))
 		}
 		p.argp = nil
 
 		// reflectcall did not panic. Remove d.
+		// reflectcall 不会 panic. 移出 d.
 		if gp._defer != d {
 			throw("bad defer entry in panic")
 		}
@@ -981,7 +1002,9 @@ func gopanic(e interface{}) {
 		// trigger shrinkage to test stack copy. See stack_test.go:TestStackPanic
 		//GC()
 
+		// 取出了程序计数器 pc
 		pc := d.pc
+		// 取出栈指针 sp，必须是指针，以便在栈复制期间进行调整
 		sp := unsafe.Pointer(d.sp) // must be pointer so it gets adjusted during stack copy
 		if done {
 			d.fn = nil
@@ -990,6 +1013,8 @@ func gopanic(e interface{}) {
 		}
 		if p.recovered {
 			gp._panic = p.link
+			// 忽略的 panic 会被标记，但仍然保留在 g.panic 列表中
+			// 这里将它们移出列表
 			if gp._panic != nil && gp._panic.goexit && gp._panic.aborted {
 				// A normal recover would bypass/abort the Goexit.  Instead,
 				// we return to the processing loop of the Goexit.
@@ -1045,13 +1070,17 @@ func gopanic(e interface{}) {
 			for gp._panic != nil && gp._panic.aborted {
 				gp._panic = gp._panic.link
 			}
+			// 必须由 signal 完成
 			if gp._panic == nil { // must be done with signal
 				gp.sig = 0
 			}
 			// Pass information about recovering frame to recovery.
+			// 传递关于恢复帧的信息
 			gp.sigcode0 = uintptr(sp)
 			gp.sigcode1 = pc
+			// 调用 recover，并重新进入调度循环，不再返回
 			mcall(recovery)
+			// 如果无法重新进入调度循环，则无法恢复错误
 			throw("recovery failed") // mcall should not return
 		}
 	}
@@ -1060,8 +1089,13 @@ func gopanic(e interface{}) {
 	// Because it is unsafe to call arbitrary user code after freezing
 	// the world, we call preprintpanics to invoke all necessary Error
 	// and String methods to prepare the panic strings before startpanic.
+	// 如果所有的 defer 都没有指明显式的 recover，那么这时候则直接在运行时抛出 panic 信息
+	// 消耗完所有的 defer 调用，保守地进行 panic
+	// 因为在冻结之后调用任意用户代码是不安全的，所以我们调用 preprintpanics 来调用
+	// 所有必要的 Error 和 String 方法来在 startpanic 之前准备 panic 字符串。
 	preprintpanics(gp._panic)
 
+	// 中止整个程序
 	fatalpanic(gp._panic) // should not return
 	*(*int)(nil) = 0      // not reached
 }
@@ -1082,6 +1116,7 @@ func getargp(x int) uintptr {
 // TODO(rsc): Once we commit to CopyStackAlways,
 // this doesn't need to be nosplit.
 //go:nosplit
+// 编译器会将关键字 recover 转换成 runtime.gorecover
 func gorecover(argp uintptr) interface{} {
 	// Must be in a function running as part of a deferred call during the panic.
 	// Must be called from the topmost function of the call
@@ -1089,12 +1124,18 @@ func gorecover(argp uintptr) interface{} {
 	// p.argp is the argument pointer of that topmost deferred function call.
 	// Compare against argp reported by caller.
 	// If they match, the caller is the one who can recover.
+	// 必须在 panic 期间作为 defer 调用的一部分在函数中运行。
+	// 必须从调用的最顶层函数（ defer 语句中使用的函数）调用。
+	// p.argp 是最顶层 defer 函数调用的参数指针。
+	// 比较调用方报告的 argp，如果匹配，则调用者可以恢复。
 	gp := getg()
 	p := gp._panic
 	if p != nil && !p.goexit && !p.recovered && argp == uintptr(p.argp) {
+		// 修改 runtime._panic 的 recovered 字段
 		p.recovered = true
 		return p.arg
 	}
+	// 如果当前 Goroutine 没有调用 panic，那么该函数会直接返回 nil
 	return nil
 }
 
@@ -1134,8 +1175,11 @@ var paniclk mutex
 // Unwind the stack after a deferred function calls recover
 // after a panic. Then arrange to continue running as though
 // the caller of the deferred function returned normally.
+// 在发生 panic 后 defer 函数调用 recover 后展开栈。然后安排继续运行，
+// 就像 defer 函数的调用方正常返回一样。
 func recovery(gp *g) {
 	// Info about defer passed in G struct.
+	// 传递到 G 结构的 defer 信息
 	sp := gp.sigcode0
 	pc := gp.sigcode1
 
@@ -1148,9 +1192,12 @@ func recovery(gp *g) {
 	// Make the deferproc for this d return again,
 	// this time returning 1. The calling function will
 	// jump to the standard return epilogue.
+	// 使 deferproc 为此 d 返回
+	// 这时候返回 1。调用函数将跳转到标准的返回尾声
 	gp.sched.sp = sp
 	gp.sched.pc = pc
 	gp.sched.lr = 0
+	// 将函数的返回值设置成 1
 	gp.sched.ret = 1
 	gogo(&gp.sched)
 }
@@ -1187,6 +1234,7 @@ func fatalthrow() {
 // runningPanicDefers once main is blocked from exiting.
 //
 //go:nosplit
+// 实现了无法被恢复的程序崩溃，它在中止程序之前会通过
 func fatalpanic(msgs *_panic) {
 	pc := getcallerpc()
 	sp := getcallersp()
@@ -1194,6 +1242,7 @@ func fatalpanic(msgs *_panic) {
 	var docrash bool
 	// Switch to the system stack to avoid any stack growth, which
 	// may make things worse if the runtime is in a bad state.
+	// 切换到系统栈来避免栈增长，如果运行时状态较差则可能导致更糟糕的事情
 	systemstack(func() {
 		if startpanic_m() && msgs != nil {
 			// There were panic messages and startpanic_m
@@ -1202,8 +1251,12 @@ func fatalpanic(msgs *_panic) {
 			// startpanic_m set panicking, which will
 			// block main from exiting, so now OK to
 			// decrement runningPanicDefers.
+			// 有 panic 消息和 startpanic_m 则可以尝试打印它们
+			// startpanic_m 设置 panic 会从阻止 main 的退出，
+			// 因此现在可以开始减少 runningPanicDefers 了
 			atomic.Xadd(&runningPanicDefers, -1)
 
+			// 打印出全部的 panic 消息以及调用时传入的参数
 			printpanics(msgs)
 		}
 
@@ -1214,10 +1267,14 @@ func fatalpanic(msgs *_panic) {
 		// By crashing outside the above systemstack call, debuggers
 		// will not be confused when generating a backtrace.
 		// Function crash is marked nosplit to avoid stack growth.
+		// 通过在上述 systemstack 调用之外崩溃，调试器在生成回溯时不会混淆。
+		// 函数崩溃标记为 nosplit 以避免堆栈增长。
 		crash()
 	}
 
+	// 从系统栈退出
 	systemstack(func() {
+		// 退出当前程序并返回错误码 2
 		exit(2)
 	})
 

@@ -31,6 +31,7 @@ func getg() *g
 // This must NOT be go:noescape: if fn is a stack-allocated closure,
 // fn puts g on a run queue, and g executes before fn returns, the
 // closure will be invalidated while it is still executing.
+// mcall在golang需要进行协程切换时被调用，用来保存被切换出去协程的信息，并在当前线程的g0协程堆栈上执行新的函数。
 func mcall(fn func(*g))
 
 // systemstack runs fn on a system stack.
@@ -187,6 +188,14 @@ func breakpoint()
 // passes nil for the frame type.
 //
 // Package reflect accesses this symbol through a linkname.
+
+// reflectcall 使用 arg 指向的 n 个参数字节的副本调用 fn。
+// fn 返回后，reflectcall 在返回之前将 n-retoffset 结果字节复制回 arg+retoffset。
+// 如果重新复制结果字节，则调用者应将参数帧类型作为 argtype 传递，以便该调用可以在复制期间执行适当的写障碍。
+// reflect 包传递帧类型。在 runtime 包中，只有一个调用将结果复制回来，即 cgocallbackg1，
+// 并且它不传递帧类型，这意味着没有调用写障碍。参见该调用的页面了解相关理由。
+//
+// 包 reflect 通过 linkname 访问此符号
 func reflectcall(argtype *_type, fn, arg unsafe.Pointer, argsize uint32, retoffset uint32)
 
 func procyield(cycles uint32)
