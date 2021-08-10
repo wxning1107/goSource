@@ -236,6 +236,7 @@ func deferproc(siz int32, fn *funcval) { // arguments of fn follow fn
 	argp := uintptr(unsafe.Pointer(&fn)) + unsafe.Sizeof(fn)
 	callerpc := getcallerpc()
 
+	// 获得 runtime._defer 结构体，共有三个途径
 	d := newdefer(siz)
 	if d._panic != nil {
 		throw("deferproc: d.panic != nil after newdefer")
@@ -245,12 +246,15 @@ func deferproc(siz int32, fn *funcval) { // arguments of fn follow fn
 	d.fn = fn
 	d.pc = callerpc
 	d.sp = sp
+	// 将相关参数拷贝到相邻内存中
 	switch siz {
 	case 0:
 		// Do nothing.
 	case sys.PtrSize:
+		// 参数是指针类型，直接改变指针引用即可
 		*(*uintptr)(deferArgs(d)) = *(*uintptr)(unsafe.Pointer(argp))
 	default:
+		// 参数是非指针类型，将参数拷贝到相邻空间中
 		memmove(deferArgs(d), unsafe.Pointer(argp), uintptr(siz))
 	}
 
@@ -389,12 +393,14 @@ func init() {
 // stack map information when this is called.
 //
 //go:nosplit
+// 获取_defer
 func newdefer(siz int32) *_defer {
 	var d *_defer
 	sc := deferclass(uintptr(siz))
 	gp := getg()
 	if sc < uintptr(len(p{}.deferpool)) {
 		pp := gp.m.p.ptr()
+		// 如果p的defer池子为空，sched的defer池子不为空，从sched池中取p的defer池大小一半的_defer放到p的本地池子中
 		if len(pp.deferpool[sc]) == 0 && sched.deferpool[sc] != nil {
 			// Take the slow path on the system stack so
 			// we don't grow newdefer's stack.
@@ -409,12 +415,14 @@ func newdefer(siz int32) *_defer {
 				unlock(&sched.deferlock)
 			})
 		}
+		// 从p本地defer池中获取一个_defer
 		if n := len(pp.deferpool[sc]); n > 0 {
 			d = pp.deferpool[sc][n-1]
 			pp.deferpool[sc][n-1] = nil
 			pp.deferpool[sc] = pp.deferpool[sc][:n-1]
 		}
 	}
+	// 如果p本地也没有defer，在堆上创建一个defer
 	if d == nil {
 		// Allocate new defer+args.
 		systemstack(func() {
