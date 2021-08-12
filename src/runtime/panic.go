@@ -948,6 +948,7 @@ func gopanic(e interface{}) {
 	addOneOpenDeferFrame(gp, getcallerpc(), unsafe.Pointer(getcallersp()))
 
 	// 在循环中不断从当前 Goroutine 的 _defer 中链表获取 runtime._defer 并调用 runtime.reflectcall 运行延迟调用函数
+	// 首先，当 panic 发生时，如果错误是可恢复的错误，那么 会逐一遍历该 goroutine 对应 defer 链表中的 defer 函数链表，直到 defer 遍历完毕、 或者再次进入调度循环（recover 的 mcall 调用） 后才会停止
 	for {
 		// 开始逐个取当前 goroutine 的 defer 调用
 		d := gp._defer
@@ -959,6 +960,7 @@ func gopanic(e interface{}) {
 		// If defer was started by earlier panic or Goexit (and, since we're back here, that triggered a new panic),
 		// take defer off list. An earlier panic will not continue running, but we will make sure below that an
 		// earlier Goexit does continue running.
+
 		// 如果 defer 是由早期的 panic 或 Goexit 开始的（并且，因为我们回到这里，这引发了新的 panic,
 		// 则将 defer 带离链表。更早的 panic 或 Goexit 将无法继续运行。
 		if d.started {
@@ -981,6 +983,7 @@ func gopanic(e interface{}) {
 		// Mark defer as started, but keep on list, so that traceback
 		// can find and update the defer's argument frame if stack growth
 		// or a garbage collection happens before reflectcall starts executing d.fn.
+
 		// 如果栈增长或者垃圾回收在 reflectcall 开始执行 d.fn 前发生
 		// 标记 defer 已经开始执行，但仍将其保存在列表中，从而 traceback 可以找到并更新这个 defer 的参数帧
 		d.started = true
@@ -988,6 +991,7 @@ func gopanic(e interface{}) {
 		// Record the panic that is running the defer.
 		// If there is a new panic during the deferred call, that panic
 		// will find d in the list and will mark d._panic (this panic) aborted.
+
 		// 记录正在运行 defer 的 panic，如果在 defer 调用期间出现新的 panic，该 panic 将在列表中
 		// 找到 d 并标记 d._panic（该 panic）中止。
 		d._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
@@ -1001,6 +1005,7 @@ func gopanic(e interface{}) {
 		} else {
 			p.argp = unsafe.Pointer(getargp(0))
 			// 每个在 panic 和 recover 之间的 defer 都会在这里通过 reflectcall 执行。运行延迟调用函数
+			// 如果某个 defer 包含了 recover 的调用（即 gorecover 调用）被执行，这时 _panic 实例 p.recovered 会被标记为 true
 			reflectcall(nil, unsafe.Pointer(d.fn), deferArgs(d), uint32(d.siz), uint32(d.siz))
 		}
 		p.argp = nil
@@ -1189,6 +1194,7 @@ var paniclk mutex
 // Unwind the stack after a deferred function calls recover
 // after a panic. Then arrange to continue running as though
 // the caller of the deferred function returned normally.
+
 // 在发生 panic 后 defer 函数调用 recover 后展开栈。然后安排继续运行，
 // 就像 defer 函数的调用方正常返回一样。
 func recovery(gp *g) {
@@ -1206,6 +1212,7 @@ func recovery(gp *g) {
 	// Make the deferproc for this d return again,
 	// this time returning 1. The calling function will
 	// jump to the standard return epilogue.
+
 	// 使 deferproc 为此 d 返回
 	// 这时候返回 1。调用函数将跳转到标准的返回尾声
 	gp.sched.sp = sp
