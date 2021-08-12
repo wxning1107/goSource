@@ -1156,6 +1156,8 @@ func (s *state) stmt(n *Node) {
 			}
 		}
 	case ODEFER:
+		// 堆分配、栈分配和开放编码是处理 defer 关键字的三种方法，早期的 Go 语言会在堆上分配 runtime._defer 结构体，不过该实现的性能较差，
+		// Go 语言在 1.13 中引入栈上分配的结构体，减少了 30% 的额外开销1，并在 1.14 中引入了基于开放编码的 defer，使得该关键字的额外开销可以忽略不计
 		if Debug_defer > 0 {
 			var defertype string
 			if s.hasOpenDefers {
@@ -1171,7 +1173,7 @@ func (s *state) stmt(n *Node) {
 			// 开放编码
 			s.openDeferRecord(n.Left)
 		} else {
-			// 堆分配
+			// 堆分配，兜底方案
 			d := callDefer
 			if n.Esc == EscNever {
 				// 栈分配
@@ -4537,6 +4539,11 @@ func (s *state) callAddr(n *Node, k callKind) *ssa.Value {
 
 // Calls the function n using the specified call type.
 // Returns the address of the return value (or nil if none).
+// 1.获取需要执行的函数名、闭包指针、代码指针和函数调用的接收方；
+// 2.获取栈地址并将函数或者方法的参数写入栈中；
+// 3.使用 cmd/compile/internal/gc.state.newValue1A 以及相关函数生成函数调用的中间代码；
+// 4.如果当前调用的函数是 defer，那么会单独生成相关的结束代码块；
+// 5.获取函数的返回值地址并结束当前调用；
 func (s *state) call(n *Node, k callKind, returnResultAddr bool) *ssa.Value {
 	s.prevCall = nil
 	var sym *types.Sym     // target symbol (if static)

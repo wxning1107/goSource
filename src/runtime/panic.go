@@ -241,6 +241,7 @@ func deferproc(siz int32, fn *funcval) { // arguments of fn follow fn
 	if d._panic != nil {
 		throw("deferproc: d.panic != nil after newdefer")
 	}
+	// 追加到所在 Goroutine _defer 链表的最前面
 	d.link = gp._defer
 	gp._defer = d
 	d.fn = fn
@@ -264,6 +265,7 @@ func deferproc(siz int32, fn *funcval) { // arguments of fn follow fn
 	// the code the compiler generates always
 	// checks the return value and jumps to the
 	// end of the function if deferproc returns != 0.
+	// 当 runtime.deferproc 函数的返回值是 1 时，编译器生成的代码会直接跳转到调用方函数返回之前并执行 runtime.deferreturn
 	return0()
 	// No code can go here - the C return register has
 	// been set and must not be clobbered.
@@ -529,6 +531,7 @@ func freedeferfn() {
 // The single argument isn't actually used - it just has its address
 // taken so it can be matched against pending defers.
 //go:nosplit
+// 从 Goroutine 的 _defer 链表中取出最前面的 runtime._defer 并调用 runtime.jmpdefer 传入需要执行的函数和参数
 func deferreturn(arg0 uintptr) {
 	gp := getg()
 	d := gp._defer
@@ -573,6 +576,8 @@ func deferreturn(arg0 uintptr) {
 	// stack, because the stack trace can be incorrect in that case - see
 	// issue #8153).
 	_ = fn.fn
+	// 是一个用汇编语言实现的运行时函数，它的主要工作是跳转到 defer 所在的代码段并在执行结束之后跳转回 runtime.deferreturn
+	// 会多次判断当前 Goroutine 的 _defer 链表中是否有未执行的结构体，该函数只有在所有延迟函数都执行后才会返回
 	jmpdefer(fn, uintptr(unsafe.Pointer(&arg0)))
 }
 
@@ -983,7 +988,7 @@ func gopanic(e interface{}) {
 		// Record the panic that is running the defer.
 		// If there is a new panic during the deferred call, that panic
 		// will find d in the list and will mark d._panic (this panic) aborted.
-		// 记录正在运行 defer 的 panic。如果在 defer 调用期间出现新的 panic，该 panic 将在列表中
+		// 记录正在运行 defer 的 panic，如果在 defer 调用期间出现新的 panic，该 panic 将在列表中
 		// 找到 d 并标记 d._panic（该 panic）中止。
 		d._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
 
@@ -995,7 +1000,7 @@ func gopanic(e interface{}) {
 			}
 		} else {
 			p.argp = unsafe.Pointer(getargp(0))
-			// 每个在 panic 和 recover 之间的 defer 都会在这里通过 reflectcall 执行。
+			// 每个在 panic 和 recover 之间的 defer 都会在这里通过 reflectcall 执行。运行延迟调用函数
 			reflectcall(nil, unsafe.Pointer(d.fn), deferArgs(d), uint32(d.siz), uint32(d.siz))
 		}
 		p.argp = nil
@@ -1132,6 +1137,7 @@ func gorecover(argp uintptr) interface{} {
 	// p.argp is the argument pointer of that topmost deferred function call.
 	// Compare against argp reported by caller.
 	// If they match, the caller is the one who can recover.
+
 	// 必须在 panic 期间作为 defer 调用的一部分在函数中运行。
 	// 必须从调用的最顶层函数（ defer 语句中使用的函数）调用。
 	// p.argp 是最顶层 defer 函数调用的参数指针。
@@ -1206,7 +1212,11 @@ func recovery(gp *g) {
 	gp.sched.pc = pc
 	gp.sched.lr = 0
 	// 将函数的返回值设置成 1
+	// 从 runtime.deferproc 的注释中我们会发现，当 runtime.deferproc 函数的返回值是 1 时，编译器生成的代码会直接跳转到调用方函数返回之前并执行 runtime.deferreturn
 	gp.sched.ret = 1
+	// 在调用 defer 关键字时，调用时的栈指针 sp 和程序计数器 pc 就已经存储到了 runtime._defer 结构体中，这里的 runtime.gogo 函数会跳回 defer 关键字调用的位置。
+	// 跳转到 runtime.deferreturn 函数之后，程序就已经从 panic 中恢复了并执行正常的逻辑
+	// 跳回 defer 关键字调用的位置
 	gogo(&gp.sched)
 }
 

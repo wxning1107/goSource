@@ -331,6 +331,7 @@ func parentCancelCtx(parent Context) (*cancelCtx, bool) {
 	if done == closedchan || done == nil {
 		return nil, false
 	}
+	// 向上依次调用value
 	p, ok := parent.Value(&cancelCtxKey).(*cancelCtx)
 	if !ok {
 		return nil, false
