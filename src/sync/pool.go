@@ -42,24 +42,34 @@ import (
 //
 // A Pool must not be copied after first use.
 type Pool struct {
+	// 因为 Pool 不希望被复制，所以结构体里有一个 noCopy 的字段，使用 go vet 工具可以检测到用户代码是否复制了 Pool
 	noCopy noCopy
 
-	local     unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
-	localSize uintptr        // size of the local array
+	// 每个 P 的本地队列，实际类型为 [P]poolLocal
+	local unsafe.Pointer // local fixed-size per-P pool, actual type is [P]poolLocal
+	// [P]poolLocal的大小
+	// 访问时，P 的 id 对应 [P]poolLocal 下标索引。通过这样的设计，多个 goroutine 使用同一个 Pool 时，减少了竞争，提升了性能
+	localSize uintptr // size of the local array
 
+	// 在一轮 GC 到来时，victim 和 victimSize 会分别“接管” local 和 localSize。victim 的机制用于减少 GC 后冷启动导致的性能抖动，让分配对象更平滑。
+	// Victim Cache 本来是计算机架构里面的一个概念，是 CPU 硬件处理缓存的一种技术，sync.Pool 引入的意图在于降低 GC 压力的同时提高命中率。
 	victim     unsafe.Pointer // local from previous cycle
 	victimSize uintptr        // size of victims array
 
 	// New optionally specifies a function to generate
 	// a value when Get would otherwise return nil.
 	// It may not be changed concurrently with calls to Get.
+
+	// 自定义的对象创建回调函数，当 pool 中无可用对象时会调用此函数
 	New func() interface{}
 }
 
 // Local per-P Pool appendix.
 type poolLocalInternal struct {
+	// P 的私有缓存区，使用时无需要加锁
 	private interface{} // Can be used only by the respective P.
-	shared  poolChain   // Local P can pushHead/popHead; any P can popTail.
+	// 公共缓存区。本地 P 可以 pushHead/popHead；其他 P 则只能 popTail
+	shared poolChain // Local P can pushHead/popHead; any P can popTail.
 }
 
 type poolLocal struct {
@@ -67,6 +77,11 @@ type poolLocal struct {
 
 	// Prevents false sharing on widespread platforms with
 	// 128 mod (cache line size) = 0 .
+
+	// 将 poolLocal 补齐至两个缓存行的倍数，防止 false sharing,
+	// 每个缓存行具有 64 bytes，即 512 bit
+	// 目前我们的处理器一般拥有 32 * 1024 / 64 = 512 条缓存行
+	// 伪共享，仅占位用，防止在 cache line 上分配多个 poolLocalInternal
 	pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte
 }
 
@@ -125,6 +140,7 @@ func (p *Pool) Get() interface{} {
 	if race.Enabled {
 		race.Disable()
 	}
+	// 将当前的 goroutine 和 P 绑定，禁止被抢占，返回当前 P 对应的 poolLocal，以及 pid
 	l, pid := p.pin()
 	x := l.private
 	l.private = nil
@@ -132,11 +148,14 @@ func (p *Pool) Get() interface{} {
 		// Try to pop the head of the local shard. We prefer
 		// the head over the tail for temporal locality of
 		// reuse.
+		// 尝试从 l.shared 的头部 pop 一个对象出来，同时赋值给 x
 		x, _ = l.shared.popHead()
 		if x == nil {
+			// 如果 x 仍然为空，则调用 getSlow 尝试从其他 P 的 shared 双端队列尾部“偷”一个对象出来。
 			x = p.getSlow(pid)
 		}
 	}
+	// 解除非抢占
 	runtime_procUnpin()
 	if race.Enabled {
 		race.Enable()
@@ -144,6 +163,7 @@ func (p *Pool) Get() interface{} {
 			race.Acquire(poolRaceAddr(x))
 		}
 	}
+	// 最后如果还是没有取到缓存的对象，那就直接调用预先设置好的 New 函数，创建一个出来。
 	if x == nil && p.New != nil {
 		x = p.New()
 	}
@@ -192,6 +212,8 @@ func (p *Pool) getSlow(pid int) interface{} {
 // pin pins the current goroutine to P, disables preemption and
 // returns poolLocal pool for the P and the P's id.
 // Caller must call runtime_procUnpin() when done with the pool.
+// 调用方必须在完成取值后调用 runtime_procUnpin() 来取消抢占。
+// pin 的作用就是将当前 groutine 和 P 绑定在一起，禁止抢占。并且返回对应的 poolLocal 以及 P 的 id。
 func (p *Pool) pin() (*poolLocal, int) {
 	pid := runtime_procPin()
 	// In pinSlow we store to local and then to localSize, here we load in opposite order.
@@ -216,6 +238,7 @@ func (p *Pool) pinSlow() (*poolLocal, int) {
 	// poolCleanup won't be called while we are pinned.
 	s := p.localSize
 	l := p.local
+	// 因为 pinSlow 中途可能已经被其他的线程调用，因此这时候需要再次对 pid 进行检查。 如果 pid 在 p.local 大小范围内，则不用创建 poolLocal 切片，直接返回。
 	if uintptr(pid) < s {
 		return indexLocal(l, pid), pid
 	}
@@ -223,8 +246,10 @@ func (p *Pool) pinSlow() (*poolLocal, int) {
 		allPools = append(allPools, p)
 	}
 	// If GOMAXPROCS changes between GCs, we re-allocate the array and lose the old one.
+	// 当前 P 的数量
 	size := runtime.GOMAXPROCS(0)
 	local := make([]poolLocal, size)
+	// 旧的 local 会被回收
 	atomic.StorePointer(&p.local, unsafe.Pointer(&local[0])) // store-release
 	runtime_StoreReluintptr(&p.localSize, uintptr(size))     // store-release
 	return &local[pid], pid

@@ -91,6 +91,7 @@ func (c *copyChecker) check() {
 //
 // See https://golang.org/issues/8005#issuecomment-190753527
 // for details.
+//  noCopy 用于嵌入一个结构体中来保证其第一次使用后不会被复制
 type noCopy struct{}
 
 // Lock is a no-op used by -copylocks checker from `go vet`.

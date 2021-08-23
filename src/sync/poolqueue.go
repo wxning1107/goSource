@@ -16,6 +16,8 @@ import (
 // It has the added feature that it nils out unused slots to avoid
 // unnecessary retention of objects. This is important for sync.Pool,
 // but not typically a property considered in the literature.
+// poolDequeue 被实现为单生产者、多消费者的固定大小的无锁（atomic 实现） Ring 式队列（底层存储使用数组，使用两个指针标记 head、tail）。
+// 生产者可以从 head 插入、head 删除，而消费者仅可从 tail 删除。 headTail 指向队列的头和尾，通过位运算将 head 和 tail 存入 headTail 变量中。
 type poolDequeue struct {
 	// headTail packs together a 32-bit head index and a 32-bit
 	// tail index. Both are indexes into vals modulo len(vals)-1.
@@ -31,6 +33,10 @@ type poolDequeue struct {
 	// The head index is stored in the most-significant bits so
 	// that we can atomically add to it and the overflow is
 	// harmless.
+
+	// headTail 包含一个 32 位的 head 和一个 32 位的 tail 指针。这两个值都和 len(vals)-1 取模过。
+	// tail 是队列中最老的数据，head 指向下一个将要填充的 slot
+	// slots 的有效范围是 [tail, head)，由 consumers 持有。
 	headTail uint64
 
 	// vals is a ring buffer of interface{} values stored in this
@@ -41,6 +47,11 @@ type poolDequeue struct {
 	// index has moved beyond it and typ has been set to nil. This
 	// is set to nil atomically by the consumer and read
 	// atomically by the producer.
+
+	// vals 是一个存储 interface{} 的环形队列，它的 size 必须是 2 的幂
+	// 如果 slot 为空，则 vals[i].typ 为空；否则，非空。
+	// 一个 slot 在这时宣告无效：tail 不指向它了，vals[i].typ 为 nil
+	// 由 consumer 设置成 nil，由 producer 读
 	vals []eface
 }
 
@@ -191,13 +202,16 @@ func (d *poolDequeue) popTail() (interface{}, bool) {
 // dequeue fills up, this allocates a new one and only ever pushes to
 // the latest dequeue. Pops happen from the other end of the list and
 // once a dequeue is exhausted, it gets removed from the list.
+// 双端队列
 type poolChain struct {
 	// head is the poolDequeue to push to. This is only accessed
 	// by the producer, so doesn't need to be synchronized.
+	// 只有生产者会 push to，不用加锁
 	head *poolChainElt
 
 	// tail is the poolDequeue to popTail from. This is accessed
 	// by consumers, so reads and writes must be atomic.
+	// 读写需要原子控制。 pop from
 	tail *poolChainElt
 }
 
@@ -214,6 +228,9 @@ type poolChainElt struct {
 	// prev is written atomically by the consumer and read
 	// atomically by the producer. It only transitions from
 	// non-nil to nil.
+
+	// next 被 producer 写，consumer 读。所以只会从 nil 变成 non-nil
+	// prev 被 consumer 写，producer 读。所以只会从 non-nil 变成 nil
 	next, prev *poolChainElt
 }
 
