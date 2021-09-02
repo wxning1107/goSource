@@ -27,6 +27,7 @@ func dupSocket(f *os.File) (int, error) {
 	return s, nil
 }
 
+// 初始化文件I/O
 func newFileFD(f *os.File) (*netFD, error) {
 	s, err := dupSocket(f)
 	if err != nil {

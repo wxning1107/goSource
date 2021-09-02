@@ -79,19 +79,22 @@ type pollDesc struct {
 	lock    mutex // protects the following fields
 	fd      uintptr
 	closing bool
-	everr   bool      // marks event scanning error happened
-	user    uint32    // user settable cookie
-	rseq    uintptr   // protects from stale read timers
-	rg      uintptr   // pdReady, pdWait, G waiting for read or nil
-	rt      timer     // read deadline timer (set if rt.f != nil)
-	rd      int64     // read deadline
-	wseq    uintptr   // protects from stale write timers
-	wg      uintptr   // pdReady, pdWait, G waiting for write or nil
-	wt      timer     // write deadline timer
-	wd      int64     // write deadline
-	self    *pollDesc // storage for indirect interface. See (*pollDesc).makeArg.
+	everr   bool    // marks event scanning error happened
+	user    uint32  // user settable cookie
+	rseq    uintptr // protects from stale read timers
+	// 取值分别可能是 pdReady、pdWait、等待 file descriptor 就绪的 goroutine 也就是 g 数据结构以及 nil，它们是实现唤醒 goroutine 的关键
+	rg   uintptr // pdReady, pdWait, G waiting for read or nil
+	rt   timer   // read deadline timer (set if rt.f != nil)
+	rd   int64   // read deadline
+	wseq uintptr // protects from stale write timers
+	// 取值分别可能是 pdReady、pdWait、等待 file descriptor 就绪的 goroutine 也就是 g 数据结构以及 nil，它们是实现唤醒 goroutine 的关键
+	wg   uintptr   // pdReady, pdWait, G waiting for write or nil
+	wt   timer     // write deadline timer
+	wd   int64     // write deadline
+	self *pollDesc // storage for indirect interface. See (*pollDesc).makeArg.
 }
 
+// 因为 runtime.pollCache 是一个在 runtime 包里的全局变量，因此需要用一个互斥锁来避免 data race 问题，从它的名字也能看出这是一个用于缓存的数据结构，也就是用来提高性能的
 type pollCache struct {
 	lock  mutex
 	first *pollDesc
@@ -140,6 +143,7 @@ func poll_runtime_isPollServerDescriptor(fd uintptr) bool {
 }
 
 //go:linkname poll_runtime_pollOpen internal/poll.runtime_pollOpen
+// 往 epoll 实例注册 fd
 func poll_runtime_pollOpen(fd uintptr) (*pollDesc, int) {
 	pd := pollcache.alloc()
 	lock(&pd.lock)
@@ -181,6 +185,9 @@ func poll_runtime_pollClose(pd *pollDesc) {
 	pollcache.free(pd)
 }
 
+// Go runtime 会在关闭 pollDesc 之时调用 runtime.pollCache.free 释放内存
+// 释放已经用完的 runtime.pollDesc 结构，它会直接将结构体插入链表的最前面
+// 没有重置 runtime.pollDesc 结构体中的字段，该结构体被重复利用时才会由 runtime.poll_runtime_pollOpen 函数重置。
 func (c *pollCache) free(pd *pollDesc) {
 	lock(&c.lock)
 	pd.link = c.first
@@ -210,6 +217,7 @@ func poll_runtime_pollReset(pd *pollDesc, mode int) int {
 // according to mode, which is 'r' or 'w'.
 // This returns an error code; the codes are defined above.
 //go:linkname poll_runtime_pollWait internal/poll.runtime_pollWait
+// 无 I/O 事件时 park 住 goroutine
 func poll_runtime_pollWait(pd *pollDesc, mode int) int {
 	errcode := netpollcheckerr(pd, int32(mode))
 	if errcode != pollNoError {
@@ -219,6 +227,7 @@ func poll_runtime_pollWait(pd *pollDesc, mode int) int {
 	if GOOS == "solaris" || GOOS == "illumos" || GOOS == "aix" {
 		netpollarm(pd, mode)
 	}
+	// 进入 netpollblock 并且判断是否有期待的 I/O 事件发生，这里的 for 循环是为了一直等到 io ready
 	for !netpollblock(pd, int32(mode), false) {
 		errcode = netpollcheckerr(pd, int32(mode))
 		if errcode != pollNoError {
@@ -360,6 +369,7 @@ func poll_runtime_pollUnblock(pd *pollDesc) {
 //
 // This may run while the world is stopped, so write barriers are not allowed.
 //go:nowritebarrier
+// netpollready 调用 netpollunblock 返回就绪 fd 对应的 goroutine 的抽象数据结构 g
 func netpollready(toRun *gList, pd *pollDesc, mode int32) {
 	var rg, wg *g
 	if mode == 'r' || mode == 'r'+'w' {
@@ -392,7 +402,10 @@ func netpollcheckerr(pd *pollDesc, mode int32) int {
 	return pollNoError
 }
 
+// netpollblockcommit 在 gopark 函数里被调用
 func netpollblockcommit(gp *g, gpp unsafe.Pointer) bool {
+	// 通过原子操作把当前 goroutine 抽象的数据结构 g，也就是这里的参数 gp 存入 gpp 指针，
+	// 此时 gpp 的值是 pollDesc 的 rg 或者 wg 指针
 	r := atomic.Casuintptr((*uintptr)(gpp), pdWait, uintptr(unsafe.Pointer(gp)))
 	if r {
 		// Bump the count of goroutines waiting for the poller.
@@ -411,14 +424,18 @@ func netpollgoready(gp *g, traceskip int) {
 // returns true if IO is ready, or false if timedout or closed
 // waitio - wait only for completed IO, ignore errors
 func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
+	// gpp 保存的是 goroutine 的数据结构 g，这里会根据 mode 的值决定是 rg 还是 wg，
+	// rg 和 wg 是用来保存等待 I/O 就绪的 gorouine 的，后面调用 gopark 之后，会把当前的 goroutine 的抽象数据结构 g 存入 gpp 这个指针，也就是 rg 或者 wg
 	gpp := &pd.rg
 	if mode == 'w' {
 		gpp = &pd.wg
 	}
 
 	// set the gpp semaphore to pdWait
+	// 这个 for 循环是为了等待 io ready 或者 io wait
 	for {
 		old := *gpp
+		// gpp == pdReady 表示此时已有期待的 I/O 事件发生，可以直接返回 unblock 当前 goroutine 并执行响应的 I/O 操作
 		if old == pdReady {
 			*gpp = 0
 			return true
@@ -426,6 +443,7 @@ func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
 		if old != 0 {
 			throw("runtime: double wait")
 		}
+		// 如果没有期待的 I/O 事件发生，则通过原子操作把 gpp 的值置为 pdWait 并退出 for 循环
 		if atomic.Casuintptr(gpp, 0, pdWait) {
 			break
 		}
@@ -434,6 +452,13 @@ func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
 	// need to recheck error states after setting gpp to pdWait
 	// this is necessary because runtime_pollUnblock/runtime_pollSetDeadline/deadlineimpl
 	// do the opposite: store to closing/rd/wd, membarrier, load of rg/wg
+
+	// waitio 此时是 false，netpollcheckerr 方法会检查当前 pollDesc 对应的 fd 是否是正常的，
+	// 通常来说  netpollcheckerr(pd, mode) == 0 是成立的，所以这里会执行 gopark
+	// 把当前 goroutine 给 park 住，直至对应的 fd 上发生可读/可写或者其他『期待的』I/O 事件为止，
+	// 然后 unpark 返回，在 gopark 内部会把当前 goroutine 的抽象数据结构 g 存入
+	// gpp(pollDesc.rg/pollDesc.wg) 指针里，以便在后面的 netpoll 函数取出 pollDesc 之后，
+	// 把 g 添加到链表里返回，接着重新调度 goroutine
 	if waitio || netpollcheckerr(pd, mode) == 0 {
 		gopark(netpollblockcommit, unsafe.Pointer(gpp), waitReasonIOWait, traceEvGoBlockNet, 5)
 	}
@@ -445,13 +470,16 @@ func netpollblock(pd *pollDesc, mode int32, waitio bool) bool {
 	return old == pdReady
 }
 
+// netpollunblock 会依据传入的 mode 决定从 pollDesc 的 rg 或者 wg 取出当时 gopark 之时存入的 goroutine 抽象数据结构 g 并返回
 func netpollunblock(pd *pollDesc, mode int32, ioready bool) *g {
+	// mode == 'r' 代表当时 gopark 是为了等待读事件，而 mode == 'w' 则代表是等待写事件
 	gpp := &pd.rg
 	if mode == 'w' {
 		gpp = &pd.wg
 	}
 
 	for {
+		// 取出 gpp 存储的 g
 		old := *gpp
 		if old == pdReady {
 			return nil
@@ -465,10 +493,13 @@ func netpollunblock(pd *pollDesc, mode int32, ioready bool) *g {
 		if ioready {
 			new = pdReady
 		}
+		// 重置 pollDesc 的 rg 或者 wg
 		if atomic.Casuintptr(gpp, old, new) {
+			// 如果该 goroutine 还是必须等待，则返回 nil
 			if old == pdWait {
 				old = 0
 			}
+			// 通过万能指针还原成 g 并返回
 			return (*g)(unsafe.Pointer(old))
 		}
 	}
@@ -526,8 +557,11 @@ func netpollWriteDeadline(arg interface{}, seq uintptr) {
 	netpolldeadlineimpl(arg.(*pollDesc), seq, false, true)
 }
 
+// 初始化总大小约为 4KB 的 runtime.pollDesc 结构体的链表
+// 每次调用该结构体都会返回链表头还没有被使用的 runtime.pollDesc，这种批量初始化的做法能够增加网络轮询器的吞吐量
 func (c *pollCache) alloc() *pollDesc {
 	lock(&c.lock)
+	// 判断链表头是否已经分配过值，若是，则直接返回表头这个 pollDesc，这种批量初始化数据进行缓存而后每次都直接从缓存取数据的方式是一种很常见的性能优化手段，在这里这种方式可以有效地提升 netpoller 的吞吐量
 	if c.first == nil {
 		const pdSize = unsafe.Sizeof(pollDesc{})
 		n := pollBlockSize / pdSize
@@ -536,6 +570,7 @@ func (c *pollCache) alloc() *pollDesc {
 		}
 		// Must be in non-GC memory because can be referenced
 		// only from epoll/kqueue internals.
+		// runtime.persistentalloc 会保证这些数据结构初始化在不会触发垃圾回收的内存中，让这些数据结构只能被内部的 epoll 和 kqueue 模块引用
 		mem := persistentalloc(n*pdSize, 0, &memstats.other_sys)
 		for i := uintptr(0); i < n; i++ {
 			pd := (*pollDesc)(add(mem, i*pdSize))

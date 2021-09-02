@@ -14,6 +14,7 @@ import "syscall"
 // Wrapper around the accept system call that marks the returned file
 // descriptor as nonblocking and close-on-exec.
 func accept(s int) (int, syscall.Sockaddr, string, error) {
+	// 使用 linux 的 accept 系统调用接收新连接并把这个 socket fd 设置成非阻塞 I/O
 	ns, sa, err := Accept4Func(s, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
 	// On Linux the accept4 system call was introduced in 2.6.28
 	// kernel and on FreeBSD it was introduced in 10 kernel. If we

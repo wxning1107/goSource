@@ -24,6 +24,7 @@ func socket(ctx context.Context, net string, family, sotype, proto int, ipv6only
 		poll.CloseFunc(s)
 		return nil, err
 	}
+	// 用上面创建的 listener fd 初始化 listener netFD
 	if fd, err = newFD(s, family, sotype, net); err != nil {
 		poll.CloseFunc(s)
 		return nil, err
@@ -172,6 +173,7 @@ func (fd *netFD) dial(ctx context.Context, laddr, raddr sockaddr, ctrlFn func(st
 	return nil
 }
 
+// 对 listener fd 进行 bind&listen 操作，并且调用 init 方法完成初始化
 func (fd *netFD) listenStream(laddr sockaddr, backlog int, ctrlFn func(string, string, syscall.RawConn) error) error {
 	var err error
 	if err = setDefaultListenerSockopts(fd.pfd.Sysfd); err != nil {
@@ -190,12 +192,15 @@ func (fd *netFD) listenStream(laddr sockaddr, backlog int, ctrlFn func(string, s
 			return err
 		}
 	}
+	// 完成绑定操作
 	if err = syscall.Bind(fd.pfd.Sysfd, lsa); err != nil {
 		return os.NewSyscallError("bind", err)
 	}
+	// 完成监听操作
 	if err = listenFunc(fd.pfd.Sysfd, backlog); err != nil {
 		return os.NewSyscallError("listen", err)
 	}
+	// 调用 init，内部会调用 poll.FD.Init，最后调用 pollDesc.init
 	if err = fd.init(); err != nil {
 		return err
 	}

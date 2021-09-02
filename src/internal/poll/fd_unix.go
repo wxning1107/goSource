@@ -19,9 +19,11 @@ type FD struct {
 	fdmu fdMutex
 
 	// System file descriptor. Immutable until Close.
+	// 真正的系统文件描述符
 	Sysfd int
 
 	// I/O poller.
+	// 对是底层事件驱动的封装，所有的读写超时等操作都是通过调用pollDesc的对应方法实现的。
 	pd pollDesc
 
 	// Writev cache.
@@ -159,10 +161,13 @@ func (fd *FD) Read(p []byte) (int, error) {
 		p = p[:maxRW]
 	}
 	for {
+		// 尝试从该 socket 读取数据，因为 socket 在被 listener accept 的时候设置成了非阻塞 I/O，所以这里同样也是直接返回，不管有没有可读的数据
 		n, err := ignoringEINTRIO(syscall.Read, fd.Sysfd, p)
 		if err != nil {
 			n = 0
+			// err == syscall.EAGAIN 表示当前没有期待的 I/O 事件发生，也就是 socket 不可读
 			if err == syscall.EAGAIN && fd.pd.pollable() {
+				// 如果当前没有发生期待的 I/O 事件，那么 waitRead 会通过 park goroutine 让逻辑 block 在这里
 				if err = fd.pd.waitRead(fd.isFile); err == nil {
 					continue
 				}
@@ -389,15 +394,21 @@ func (fd *FD) Accept() (int, syscall.Sockaddr, string, error) {
 		return -1, nil, "", err
 	}
 	for {
+		// 使用 linux 系统调用 accept 接收新连接，创建对应的 socket
 		s, rsa, errcall, err := accept(fd.Sysfd)
+		// 因为 listener fd 在创建的时候已经设置成非阻塞的了，
+		// 所以 accept 方法会直接返回，不管有没有新连接到来；如果 err == nil 则表示正常建立新连接，直接返回
 		if err == nil {
 			return s, rsa, "", err
 		}
+		// 如果 err != nil，则判断 err == syscall.EAGAIN，符合条件则进入 pollDesc.waitRead 方法
 		switch err {
 		case syscall.EINTR:
 			continue
 		case syscall.EAGAIN:
 			if fd.pd.pollable() {
+				// 如果当前没有发生期待的 I/O 事件，那么 waitRead 会通过 park goroutine 让逻辑 block 在这里
+				// pollDesc.waitRead 方法主要负责检测当前这个 pollDesc 的上层 netFD 对应的 fd 是否有『期待的』I/O 事件发生，如果有就直接返回，否则就 park 住当前的 goroutine 并持续等待直至对应的 fd 上发生可读/可写或者其他『期待的』I/O 事件为止，然后它就会返回到外层的 for 循环，让 goroutine 继续执行逻辑。
 				if err = fd.pd.waitRead(fd.isFile); err == nil {
 					continue
 				}

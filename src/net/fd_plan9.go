@@ -13,7 +13,9 @@ import (
 )
 
 // Network file descriptor.
+// 网络描述符
 type netFD struct {
+	// poll.FD 中包含两个重要的数据结构 Sysfd 和 pollDesc，前者是真正的系统文件描述符，后者对是底层事件驱动的封装，所有的读写超时等操作都是通过调用后者的对应方法实现的。
 	pfd poll.FD
 
 	// immutable until Close

@@ -176,6 +176,7 @@ func (c *conn) ok() bool { return c != nil && c.fd != nil }
 // Implementation of the Conn interface.
 
 // Read implements the Conn Read method.
+// 调用链：首先调用 conn 的 netFD.Read ，然后内部再调用 poll.FD.Read ，最后使用 Linux 的系统调用 read: syscall.Read 完成数据读取
 func (c *conn) Read(b []byte) (int, error) {
 	if !c.ok() {
 		return 0, syscall.EINVAL

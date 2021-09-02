@@ -14,6 +14,7 @@ import (
 )
 
 // Network file descriptor.
+// 网络描述符
 type netFD struct {
 	pfd poll.FD
 
