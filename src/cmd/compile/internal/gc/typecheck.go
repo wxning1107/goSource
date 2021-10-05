@@ -1805,7 +1805,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 
 		case TCHAN:
 			l = nil
-			if i < len(args) {
+			if i < len(args) { // 带缓冲区的异步Channel
 				l = args[i]
 				i++
 				l = typecheck(l, ctxExpr)
@@ -1819,7 +1819,7 @@ func typecheck1(n *Node, top int) (res *Node) {
 					return n
 				}
 				n.Left = l
-			} else {
+			} else { // 不带缓冲区的同步Channel
 				n.Left = nodintconst(0)
 			}
 			n.Op = OMAKECHAN
